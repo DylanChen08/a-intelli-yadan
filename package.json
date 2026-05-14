@@ -1,0 +1,18 @@
+{
+  "name": "a-intelli-yadan",
+  "version": "1.0.0",
+  "description": "AI 通行记录查询与下班提醒推送系统",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js --test",
+    "login": "node -e \"import('./src/auth.js').then(m => m.login().then(t => console.log('Token:', t)))\"",
+    "query": "node index.js --query-only"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "node-rsa": "^1.1.1",
+    "dotenv": "^16.3.0"
+  }
+}
