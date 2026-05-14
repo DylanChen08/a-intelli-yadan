@@ -5,10 +5,11 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "test": "node index.js --test",
-    "login": "node -e \"import('./src/auth.js').then(m => m.login().then(t => console.log('Token:', t)))\"",
-    "query": "node index.js --query-only"
+    "start": "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy && node index.js",
+    "test": "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy && node index.js --test",
+    "test-kimi": "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy && node index.js --test --kimi",
+    "login": "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy && node -e \"import('./src/auth.js').then(m => m.login().then(t => console.log('Token:', t)))\"",
+    "query": "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy && node index.js --query-only"
   },
   "dependencies": {
     "axios": "^1.6.0",

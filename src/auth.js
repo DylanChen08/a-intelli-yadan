@@ -15,7 +15,7 @@ const agent = new https.Agent({ rejectUnauthorized: false });
 
 export const api = axios.create({
   httpsAgent: agent,
-  timeout: 30000,
+  timeout: 60000,
 });
 
 // ---- Cookie 管理 ----

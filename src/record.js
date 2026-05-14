@@ -127,6 +127,11 @@ export async function getPersonLeaveToday(token, personId, personName, timeConfi
   const records = await queryRecords(token, personId, startTime, endTime);
   console.log(`[Record] 查到 ${records.length} 条记录`);
 
+  // 给每条记录附上 photoUrl
+  for (const r of records) {
+    r.photoUrl = extractPhotoUrl(r);
+  }
+
   const leaveRecords = extractLeaveRecords(records);
   const leaveInfo = leaveRecords.length > 0 ? leaveRecords[0] : null;
 
