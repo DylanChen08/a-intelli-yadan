@@ -41,6 +41,28 @@ export async function sendNotify(sendKey, title, content) {
  * @param {string} kimiContent - Kimi 返回的 Markdown 内容
  * @returns {{ title: string, content: string }}
  */
+/**
+ * 生成 Markdown 表格（吴雅丹打卡记录）
+ * @param {Array} records
+ * @returns {string}
+ */
+function buildTable(records) {
+  const lines = [];
+  lines.push('| 时间 | 方向 | 门 | 通行状态 | 抓拍照片 |');
+  lines.push('|------|------|------|----------|----------|');
+
+  for (const r of records) {
+    const time = r.identifyTime || '-';
+    const direction = (r.deviceName || '').includes('出') ? '出门' : '进门';
+    const door = r.deviceName || '未知';
+    const status = r.passStatus === '1' ? '正常' : '异常';
+    const photo = r.photoUrl ? `[📷 查看照片](${r.photoUrl})` : '无';
+    lines.push(`| ${time} | ${direction} | ${door} | ${status} | ${photo} |`);
+  }
+
+  return lines.join('\n');
+}
+
 export function buildSmartReport(personResults, kimiContent) {
   const today = new Date();
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -49,8 +71,16 @@ export function buildSmartReport(personResults, kimiContent) {
 
   const title = `🤖 智能日报 ${dateStr} 周${weekDay}`;
 
-  // 在 Kimi 内容底部加上来源标识
-  const content = `${kimiContent}\n\n---\n\n> 🤖 由 Kimi AI 智能分析生成 | ${dateStr} 周${weekDay}`;
+  // 找到吴雅丹的记录并生成表格
+  const wuYadan = personResults.find(p => p.name === '吴雅丹');
+  let tablePart = '';
+  if (wuYadan && wuYadan.allRecords && wuYadan.allRecords.length > 0) {
+    tablePart = `主人，今日汇报如下\n\n📋 **吴雅丹 打卡记录**\n\n${buildTable(wuYadan.allRecords)}\n\n---\n\n`;
+  } else {
+    tablePart = `主人，今日汇报如下\n\n📋 **吴雅丹 打卡记录**\n\n吴雅丹今天暂无打卡记录\n\n---\n\n`;
+  }
+
+  const content = `${tablePart}${kimiContent}\n\n---\n\n> 🤖 由 Kimi AI 智能分析生成 | ${dateStr} 周${weekDay}`;
 
   return { title, content };
 }

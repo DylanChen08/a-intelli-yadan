@@ -75,13 +75,13 @@ function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
 
   // 如果没有上次结果，这是第一次查询
   if (!lastResults) {
-    // 第一次查询：如果有人已经下班了，值得调用
-    const anyoneLeft = currentLeaveTimes.some((r) => r.hasLeft);
-    if (anyoneLeft) {
-      return { shouldCall: true, reason: '首次查询且有人已下班' };
+    // 第一次查询：只要有任何打卡记录就调用 Kimi
+    const anyRecords = currentLeaveTimes.some((r) => r.recordCount > 0);
+    if (anyRecords) {
+      return { shouldCall: true, reason: '首次查询且有打卡记录' };
     }
-    // 所有人还没下班，不需要 AI 分析
-    return { shouldCall: false, reason: '首次查询，所有人尚未下班' };
+    // 完全没有记录，不调用
+    return { shouldCall: false, reason: '首次查询，暂无任何打卡记录' };
   }
 
   const lastLeaveTimes = lastResults.map((r) => ({
@@ -173,7 +173,7 @@ async function runOnce(config, state = {}) {
       results.push(result);
     }
 
-    // AI 判断是否需要调用 Kimi
+    // AI 判断是否需要重新调用 Kimi（频率限制）
     const { shouldCall, reason } = shouldCallKimi(
       results,
       state.lastResults || null,
@@ -183,23 +183,33 @@ async function runOnce(config, state = {}) {
 
     let report;
 
-    if (shouldCall && config.kimiApiKey) {
-      // 调用 Kimi 生成智能日报
-      try {
-        const kimiContent = await generateSmartReport(config.kimiApiKey, results, config.kimiModel);
-        report = buildSmartReport(results, kimiContent);
-        state.lastKimiTime = Date.now();
-        state.usedKimi = true;
-      } catch (err) {
-        console.warn(`[${timeStr}] Kimi 调用失败，回退到模板日报: ${err.message}`);
-        report = buildDailyReport(results, config.closeThreshold);
+    if (config.kimiApiKey) {
+      // 有 Kimi API Key：始终使用智能日报格式（表格 + 对比）
+      if (shouldCall) {
+        // 需要重新调用 Kimi 生成对比分析
+        try {
+          const kimiContent = await generateSmartReport(config.kimiApiKey, results, config.kimiModel);
+          report = buildSmartReport(results, kimiContent);
+          state.lastKimiTime = Date.now();
+          state.lastKimiContent = kimiContent; // 缓存 Kimi 输出
+          state.usedKimi = true;
+        } catch (err) {
+          console.warn(`[${timeStr}] Kimi 调用失败，使用上次内容或降级: ${err.message}`);
+          // Kimi 失败时：用上次缓存的内容，或简单占位
+          const fallbackContent = state.lastKimiContent || '📊 **吴雅丹 vs 黄治富 对比**\n\n（AI 分析暂时不可用）';
+          report = buildSmartReport(results, fallbackContent);
+          state.usedKimi = false;
+        }
+      } else {
+        // 不需要重新调用 Kimi：用上次缓存的内容继续生成智能日报
+        const cachedContent = state.lastKimiContent || '📊 **吴雅丹 vs 黄治富 对比**\n\n（暂无最新分析）';
+        report = buildSmartReport(results, cachedContent);
         state.usedKimi = false;
+        console.log(`[${timeStr}] 使用缓存的 Kimi 内容`);
       }
     } else {
-      // 使用模板日报
-      if (shouldCall && !config.kimiApiKey) {
-        console.warn(`[${timeStr}] 需要调用 Kimi 但未配置 API Key，使用模板日报`);
-      }
+      // 无 Kimi API Key：使用模板日报
+      console.warn(`[${timeStr}] 未配置 Kimi API Key，使用模板日报`);
       report = buildDailyReport(results, config.closeThreshold);
       state.usedKimi = false;
     }
