@@ -35,6 +35,16 @@ function loadConfig() {
       personId: id,
       name: personNames[i] || `人员${i + 1}`,
     })),
+    // 部门同事（仅用于下班时间对比）
+    deptPersons: (() => {
+      const deptIds = (process.env.DEPT_PERSON_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+      const deptNames = (process.env.DEPT_PERSON_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (deptIds.length === 0) return [];
+      return deptIds.map((id, i) => ({
+        personId: id,
+        name: deptNames[i] || `同事${i + 1}`,
+      }));
+    })(),
     sendKey: process.env.SERVER_CHAN_SENDKEY || '',
     closeThreshold: parseInt(process.env.CLOSE_THRESHOLD_MINUTES || '10', 10),
     timeConfig: {
@@ -56,17 +66,60 @@ function loadConfig() {
 // ---- AI 自主判断逻辑 ----
 
 /**
- * 判断是否应该调用 Kimi
+ * 检测数据是否有变化（用于决定是否推送）
  * @param {Array} currentResults - 本次查询结果
  * @param {Array|null} lastResults - 上次查询结果
+ * @returns {boolean}
+ */
+function hasNewData(currentResults, lastResults) {
+  // 第一次查询：有任何记录就算有数据
+  if (!lastResults) {
+    return currentResults.some((r) => r.allRecords && r.allRecords.length > 0);
+  }
+
+  // 对比每个人：记录数变化、下班时间变化、是否有新的下班记录
+  for (let i = 0; i < currentResults.length; i++) {
+    const curr = currentResults[i];
+    const last = lastResults[i];
+
+    // 记录总数变化
+    const currCount = curr.allRecords?.length || 0;
+    const lastCount = last.allRecords?.length || 0;
+    if (currCount !== lastCount) return true;
+
+    // 下班状态变化（从没下班 → 下班了）
+    const currHasLeft = !!curr.leaveInfo;
+    const lastHasLeft = !!last.leaveInfo;
+    if (currHasLeft !== lastHasLeft) return true;
+
+    // 下班时间变化
+    if (currHasLeft && lastHasLeft && curr.leaveInfo.time !== last.leaveInfo.time) return true;
+  }
+
+  return false;
+}
+
+/**
+ * 判断是否应该调用 Kimi
+ * @param {Array} currentResults - 本次查询结果（核心人员）
+ * @param {Array|null} lastResults - 上次查询结果（核心人员）
  * @param {number} lastKimiTime - 上次调用 Kimi 的时间戳
+ * @param {Array} currentDeptResults - 本次部门同事查询结果
+ * @param {Array|null} lastDeptResults - 上次部门同事查询结果
  * @returns {{ shouldCall: boolean, reason: string }}
  */
-function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
+function shouldCallKimi(currentResults, lastResults, lastKimiTime, currentDeptResults = [], lastDeptResults = null) {
   const now = Date.now();
 
   // 从结果中提取关键信息
   const currentLeaveTimes = currentResults.map((r) => ({
+    name: r.name,
+    hasLeft: !!r.leaveInfo,
+    leaveTime: r.leaveInfo?.time || null,
+    recordCount: r.allRecords?.length || 0,
+  }));
+
+  const currentDeptLeaveTimes = currentDeptResults.map((r) => ({
     name: r.name,
     hasLeft: !!r.leaveInfo,
     leaveTime: r.leaveInfo?.time || null,
@@ -91,10 +144,24 @@ function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
     recordCount: r.allRecords?.length || 0,
   }));
 
-  // 条件 1：检测到新的下班记录（上次没下班，这次下班了）
+  const lastDeptLeaveTimes = lastDeptResults ? lastDeptResults.map((r) => ({
+    name: r.name,
+    hasLeft: !!r.leaveInfo,
+    leaveTime: r.leaveInfo?.time || null,
+    recordCount: r.allRecords?.length || 0,
+  })) : [];
+
+  // 条件 1：检测到新的下班记录（上次没下班，这次下班了）——核心人员
   for (let i = 0; i < currentLeaveTimes.length; i++) {
     if (currentLeaveTimes[i].hasLeft && !lastLeaveTimes[i].hasLeft) {
       return { shouldCall: true, reason: `${currentLeaveTimes[i].name} 刚刚下班` };
+    }
+  }
+
+  // 条件 1b：检测到部门同事新的下班记录
+  for (let i = 0; i < currentDeptLeaveTimes.length; i++) {
+    if (currentDeptLeaveTimes[i].hasLeft && !lastDeptLeaveTimes[i]?.hasLeft) {
+      return { shouldCall: true, reason: `部门同事 ${currentDeptLeaveTimes[i].name} 刚刚下班` };
     }
   }
 
@@ -104,12 +171,22 @@ function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
     return { shouldCall: false, reason: `距上次调用不足 15 分钟` };
   }
 
-  // 条件 3：有新的通行记录（记录数增加了）
+  // 条件 3：有新的通行记录（记录数增加了）——核心人员
   let hasNewRecords = false;
   for (let i = 0; i < currentLeaveTimes.length; i++) {
     if (currentLeaveTimes[i].recordCount > lastLeaveTimes[i].recordCount) {
       hasNewRecords = true;
       break;
+    }
+  }
+
+  // 条件 3b：部门同事有新记录
+  if (!hasNewRecords) {
+    for (let i = 0; i < currentDeptLeaveTimes.length; i++) {
+      if (currentDeptLeaveTimes[i].recordCount > (lastDeptLeaveTimes[i]?.recordCount || 0)) {
+        hasNewRecords = true;
+        break;
+      }
     }
   }
 
@@ -123,7 +200,7 @@ function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
     return { shouldCall: true, reason: '距上次调用超 30 分钟且有新数据' };
   }
 
-  // 条件 5：发现加班情况（>= 20:00 下班）
+  // 条件 5：发现加班情况（>= 20:00 下班）——核心人员
   for (const person of currentLeaveTimes) {
     if (person.hasLeft && person.leaveTime) {
       const hour = parseInt(person.leaveTime.split(' ')[1]?.split(':')[0], 10);
@@ -133,12 +210,32 @@ function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
     }
   }
 
-  // 条件 6：检查数据是否有实质变化（下班时间变了）
+  // 条件 5b：部门同事加班
+  for (const person of currentDeptLeaveTimes) {
+    if (person.hasLeft && person.leaveTime) {
+      const hour = parseInt(person.leaveTime.split(' ')[1]?.split(':')[0], 10);
+      if (hour >= 20) {
+        return { shouldCall: true, reason: `部门同事 ${person.name} 加班到很晚（${hour}:xx）` };
+      }
+    }
+  }
+
+  // 条件 6：检查数据是否有实质变化（下班时间变了）——核心人员
   let hasSubstantialChange = false;
   for (let i = 0; i < currentLeaveTimes.length; i++) {
     if (currentLeaveTimes[i].leaveTime !== lastLeaveTimes[i].leaveTime) {
       hasSubstantialChange = true;
       break;
+    }
+  }
+
+  // 条件 6b：部门同事下班时间变了
+  if (!hasSubstantialChange) {
+    for (let i = 0; i < currentDeptLeaveTimes.length; i++) {
+      if (currentDeptLeaveTimes[i].leaveTime !== lastDeptLeaveTimes[i]?.leaveTime) {
+        hasSubstantialChange = true;
+        break;
+      }
     }
   }
 
@@ -155,7 +252,18 @@ function shouldCallKimi(currentResults, lastResults, lastKimiTime) {
 async function runOnce(config, state = {}) {
   const now = new Date();
   const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+  const todayDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   console.log(`\n[${timeStr}] ====== 开始查询 ======`);
+
+  // ---- 跨天检测：新的一天自动重置全部状态 ----
+  if (state.lastDate && state.lastDate !== todayDate) {
+    console.log(`[${timeStr}] 🌅 检测到新的一天（${state.lastDate} → ${todayDate}），重置状态`);
+    state.lastResults = null;
+    state.lastDeptResults = null;
+    state.lastKimiTime = 0;
+    state.lastKimiContent = null;
+  }
+  state.lastDate = todayDate;
 
   try {
     // 登录
@@ -173,22 +281,57 @@ async function runOnce(config, state = {}) {
       results.push(result);
     }
 
+    // 查询部门同事的通行记录（仅用于下班时间对比）
+    let deptResults = [];
+    if (config.deptPersons && config.deptPersons.length > 0) {
+      for (const person of config.deptPersons) {
+        const result = await getPersonLeaveToday(
+          token,
+          person.personId,
+          person.name,
+          config.timeConfig
+        );
+        deptResults.push(result);
+      }
+    }
+
+    // 合并所有人员数据用于 Kimi 分析
+    const allResults = [...results, ...deptResults];
+
     // AI 判断是否需要重新调用 Kimi（频率限制）
+    // 现在包括核心人员和部门同事的变化
     const { shouldCall, reason } = shouldCallKimi(
       results,
       state.lastResults || null,
-      state.lastKimiTime || 0
+      state.lastKimiTime || 0,
+      deptResults,
+      state.lastDeptResults || null
     );
     console.log(`[${timeStr}] AI 判断: ${shouldCall ? '✅ 调用 Kimi' : '⏭️ 跳过'} — ${reason}`);
+
+    // 检测数据是否有变化（核心人员 + 部门同事）
+    const hasCoreDataChange = hasNewData(results, state.lastResults || null);
+    const hasDeptDataChange = hasNewData(deptResults, state.lastDeptResults || null);
+    const hasDataChange = hasCoreDataChange || hasDeptDataChange;
+    console.log(`[${timeStr}] 数据变化: 核心=${hasCoreDataChange ? '有' : '无'}, 部门=${hasDeptDataChange ? '有' : '无'}`);
+
+    // 保存本次结果用于下次对比
+    state.lastResults = results;
+    state.lastDeptResults = deptResults;
+
+    if (!hasDataChange) {
+      console.log(`[${timeStr}] ⏭️ 数据无变化，跳过推送`);
+      return { success: true, pushed: false, state };
+    }
 
     let report;
 
     if (config.kimiApiKey) {
       // 有 Kimi API Key：始终使用智能日报格式（表格 + 对比）
       if (shouldCall) {
-        // 需要重新调用 Kimi 生成对比分析
+        // 需要重新调用 Kimi 生成对比分析（传入全部人员数据）
         try {
-          const kimiContent = await generateSmartReport(config.kimiApiKey, results, config.kimiModel);
+          const kimiContent = await generateSmartReport(config.kimiApiKey, allResults, config.kimiModel);
           report = buildSmartReport(results, kimiContent);
           state.lastKimiTime = Date.now();
           state.lastKimiContent = kimiContent; // 缓存 Kimi 输出
@@ -196,13 +339,13 @@ async function runOnce(config, state = {}) {
         } catch (err) {
           console.warn(`[${timeStr}] Kimi 调用失败，使用上次内容或降级: ${err.message}`);
           // Kimi 失败时：用上次缓存的内容，或简单占位
-          const fallbackContent = state.lastKimiContent || '📊 **吴雅丹 vs 黄治富 对比**\n\n（AI 分析暂时不可用）';
+          const fallbackContent = state.lastKimiContent || '📊 **下班时间对比**\n\n（AI 分析暂时不可用）';
           report = buildSmartReport(results, fallbackContent);
           state.usedKimi = false;
         }
       } else {
         // 不需要重新调用 Kimi：用上次缓存的内容继续生成智能日报
-        const cachedContent = state.lastKimiContent || '📊 **吴雅丹 vs 黄治富 对比**\n\n（暂无最新分析）';
+        const cachedContent = state.lastKimiContent || '📊 **下班时间对比**\n\n（暂无最新分析）';
         report = buildSmartReport(results, cachedContent);
         state.usedKimi = false;
         console.log(`[${timeStr}] 使用缓存的 Kimi 内容`);
@@ -217,11 +360,8 @@ async function runOnce(config, state = {}) {
     console.log(`[${timeStr}] 日报生成完毕（${state.usedKimi ? 'Kimi 智能' : '模板'}模式）`);
     await sendNotify(config.sendKey, report.title, report.content);
 
-    // 保存本次结果用于下次对比
-    state.lastResults = results;
-
-    console.log(`[${timeStr}] ✅ 本次查询完成`);
-    return { success: true, report, state };
+    console.log(`[${timeStr}] ✅ 本次查询完成，已推送`);
+    return { success: true, pushed: true, report, state };
   } catch (err) {
     console.error(`[${timeStr}] ❌ 执行出错:`, err.message);
     return { success: false, error: err.message, state };
@@ -278,8 +418,19 @@ async function runSingle() {
       results.push(result);
     }
 
+    // 查询部门同事
+    let deptResults = [];
+    if (config.deptPersons && config.deptPersons.length > 0) {
+      for (const person of config.deptPersons) {
+        const result = await getPersonLeaveToday(token, person.personId, person.name, config.timeConfig);
+        deptResults.push(result);
+      }
+    }
+
+    const allResults = [...results, ...deptResults];
+
     try {
-      const kimiContent = await generateSmartReport(config.kimiApiKey, results, config.kimiModel);
+      const kimiContent = await generateSmartReport(config.kimiApiKey, allResults, config.kimiModel);
       const report = buildSmartReport(results, kimiContent);
       await sendNotify(config.sendKey, report.title, report.content);
       console.log('✅ Kimi 智能日报生成完毕');
@@ -308,6 +459,9 @@ async function runDaemon() {
   console.log(`  监控时段: ${String(config.startHour).padStart(2, '0')}:${String(config.startMinute).padStart(2, '0')} - ${String(config.endHour).padStart(2, '0')}:00`);
   console.log(`  查询间隔: 每 ${config.intervalMinutes} 分钟`);
   console.log(`  监控人员: ${config.persons.map((p) => p.name).join(', ')}`);
+  if (config.deptPersons && config.deptPersons.length > 0) {
+    console.log(`  部门同事: ${config.deptPersons.map((p) => p.name).join(', ')}（仅对比下班时间）`);
+  }
   if (config.kimiApiKey) {
     console.log(`  Kimi 模型: ${config.kimiModel}`);
     console.log(`  AI 分析: 由系统智能判断调用时机`);
@@ -319,7 +473,9 @@ async function runDaemon() {
   // 跨轮次保持的状态
   const state = {
     lastResults: null,
+    lastDeptResults: null,
     lastKimiTime: 0,
+    lastDate: null, // 用于检测跨天，格式 "YYYY-MM-DD"
   };
 
   while (true) {
