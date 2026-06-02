@@ -11,10 +11,10 @@ const API_RECORD = `${BASE_URL}/bp-acs/record/queryIdentifyRecord`;
  * @param {string} endTime - 结束时间 (yyyy-MM-dd HH:mm:ss)
  * @returns {Array} 通行记录数组
  */
-export async function queryRecords(token, personId, startTime, endTime) {
+export async function queryRecords(token, personId, startTime, endTime, pageSize = 100) {
   const body = {
     pageNum: 1,
-    pageSize: 100,
+    pageSize,
     startTime,
     endTime,
     times: [],

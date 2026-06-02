@@ -10,17 +10,26 @@ import { queryRecords } from './record.js';
  */
 export async function getPersonWeekRecords(token, personId, personName, days = 7) {
   const now = new Date();
-  const endTime = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} 23:59:59`;
+  const allRecords = [];
 
-  const startDate = new Date(now);
-  startDate.setDate(startDate.getDate() - days + 1);
-  const startTime = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')} 00:00:00`;
+  // 按天单独查询并合并（规避 API bug：跨天查询若包含无数据日期会整体返回空）
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const startTime = `${dateStr} 00:00:00`;
+    const endTime = `${dateStr} 23:59:59`;
 
-  console.log(`[Week] 查询 ${personName} 近${days}天 (${startTime} ~ ${endTime})`);
-  const records = await queryRecords(token, personId, startTime, endTime);
-  console.log(`[Week] ${personName} 查到 ${records.length} 条`);
+    try {
+      const dayRecords = await queryRecords(token, personId, startTime, endTime, 100);
+      allRecords.push(...dayRecords);
+    } catch (err) {
+      console.warn(`[Week] ${personName} ${dateStr} 查询失败: ${err.message}`);
+    }
+  }
 
-  return { name: personName, personId, records };
+  console.log(`[Week] ${personName} 近${days}天合计 ${allRecords.length} 条`);
+  return { name: personName, personId, records: allRecords };
 }
 
 /**
