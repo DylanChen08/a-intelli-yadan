@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
+import { createServer } from 'http';
 import dotenv from 'dotenv';
 
 // 确保从脚本所在目录加载 .env
@@ -11,6 +12,16 @@ import { getToken } from './src/auth.js';
 import { getPersonLeaveToday } from './src/record.js';
 import { getPersonWeekRecords, extractDailyTimes } from './src/weekly.js';
 import { buildSmartReport, sendNotify } from './src/notify.js';
+
+// ---- 全局运行时状态（HTTP 服务和守护循环共享） ----
+const appState = {
+  forceMode: false,
+  forceIntervalSeconds: 20,
+  lastRunTime: null,
+  lastError: null,
+  lastPushed: false,
+  running: true,
+};
 
 // ---- 配置 ----
 function loadConfig() {
@@ -99,8 +110,9 @@ function hasNewData(currentResults, lastResults) {
 
 /**
  * 单次查询+推送
+ * @param {boolean} forcePush - 强制推送模式（跳过数据变化检测）
  */
-async function runOnce(config, state = {}) {
+async function runOnce(config, state = {}, forcePush = false) {
   const now = new Date();
   const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
   const todayDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -174,8 +186,11 @@ async function runOnce(config, state = {}) {
     // 检测数据是否有变化（核心人员 + 部门同事）
     const hasCoreDataChange = hasNewData(results, state.lastResults || null);
     const hasDeptDataChange = hasNewData(deptResults, state.lastDeptResults || null);
-    const hasDataChange = hasCoreDataChange || hasDeptDataChange;
-    console.log(`[${timeStr}] 数据变化: 核心=${hasCoreDataChange ? '有' : '无'}, 部门=${hasDeptDataChange ? '有' : '无'}`);
+    const hasDataChange = forcePush || hasCoreDataChange || hasDeptDataChange;
+    if (forcePush) {
+      console.log(`[${timeStr}] 🔄 强制推送模式，无条件推送`);
+    }
+    console.log(`[${timeStr}] 数据变化: 核心=${hasCoreDataChange ? '有' : '无'}, 部门=${hasDeptDataChange ? '有' : '无'}${forcePush ? ', 强制推送' : ''}`);
 
     // 保存本次结果用于下次对比
     state.lastResults = results;
@@ -238,7 +253,7 @@ async function runSingle() {
 
 /**
  * 常驻守护模式（默认）
- * 每隔 N 分钟查询一次，在监控时段内运行
+ * 短轮询检查，支持运行时动态切换间隔
  */
 async function runDaemon() {
   const config = loadConfig();
@@ -246,8 +261,9 @@ async function runDaemon() {
   console.log('========================================');
   console.log('  AI 通行记录查询 - 守护模式');
   console.log('========================================');
+  console.log(`  管理后台: http://localhost:${ADMIN_PORT}`);
   console.log(`  监控时段: ${String(config.startHour).padStart(2, '0')}:${String(config.startMinute).padStart(2, '0')} - ${String(config.endHour).padStart(2, '0')}:00`);
-  console.log(`  查询间隔: 每 ${config.intervalMinutes} 分钟`);
+  console.log(`  默认间隔: 每 ${config.intervalMinutes} 分钟`);
   console.log(`  监控人员: ${config.persons.map((p) => p.name).join(', ')}`);
   if (config.deptPersons && config.deptPersons.length > 0) {
     console.log(`  部门同事: ${config.deptPersons.map((p) => p.name).join(', ')}`);
@@ -258,37 +274,279 @@ async function runDaemon() {
   const state = {
     lastResults: null,
     lastDeptResults: null,
-    lastDate: null, // 用于检测跨天，格式 "YYYY-MM-DD"
-    weekData: null, // 近一周数据缓存
-    lastWeekDate: null, // 上次查询周数据的日期
+    lastDate: null,
+    weekData: null,
+    lastWeekDate: null,
   };
 
-  while (true) {
-    if (isInMonitorWindow(config)) {
-      await runOnce(config, state);
-      console.log(`\n⏳ 下次查询: ${config.intervalMinutes} 分钟后`);
-    } else {
-      const now = new Date();
-      const h = now.getHours();
-      if (h >= config.endHour || h < config.startHour) {
-        console.log(`💤 当前不在监控时段（${h}:${String(now.getMinutes()).padStart(2, '0')}），等待中...`);
+  let lastRunTime = 0;
+
+  while (appState.running) {
+    const now = Date.now();
+    const effectiveIntervalMs = appState.forceMode
+      ? appState.forceIntervalSeconds * 1000
+      : config.intervalMinutes * 60 * 1000;
+
+    if (now - lastRunTime >= effectiveIntervalMs) {
+      // 正常模式受监控时段限制，强制模式不受限
+      const inWindow = isInMonitorWindow(config);
+      if (inWindow || appState.forceMode) {
+        try {
+          const result = await runOnce(config, state, appState.forceMode);
+          appState.lastRunTime = new Date().toISOString();
+          appState.lastPushed = result.pushed;
+          appState.lastError = result.error || null;
+        } catch (err) {
+          appState.lastError = err.message;
+          appState.lastRunTime = new Date().toISOString();
+          console.error('[Daemon] 执行异常:', err.message);
+        }
+        lastRunTime = Date.now();
+      } else {
+        const d = new Date();
+        console.log(`💤 当前不在监控时段（${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}），等待中...`);
       }
     }
 
-    // 等待
-    await new Promise((resolve) => setTimeout(resolve, config.intervalMinutes * 60 * 1000));
+    // 短轮询间隔（5 秒），确保能快速响应开关变化
+    await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 }
 
 // ---- 入口 ----
 const isSingleRun = process.argv.includes('--once') || process.argv.includes('--test');
+const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3456', 10);
+
+// ---- HTTP 管理后台 ----
+const ADMIN_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>考勤监控 - 管理后台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1117; color: #e1e4e8; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 32px; width: 420px; max-width: 90vw;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; border-bottom: 1px solid #21262d;
+  }
+  .row:last-child { border-bottom: none; }
+  .label { font-size: 15px; color: #c9d1d9; }
+  .val { font-size: 14px; color: #8b949e; }
+  .val.ok { color: #3fb950; }
+  .val.err { color: #f85149; }
+
+  /* Toggle Switch */
+  .toggle { position: relative; display: inline-block; width: 52px; height: 28px; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+    background: #30363d; border-radius: 28px; transition: .3s;
+  }
+  .slider::before {
+    content: ""; position: absolute; height: 22px; width: 22px;
+    left: 3px; bottom: 3px; background: #c9d1d9; border-radius: 50%; transition: .3s;
+  }
+  input:checked + .slider { background: #238636; }
+  input:checked + .slider::before { transform: translateX(24px); }
+
+  .interval-input {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    color: #e1e4e8; padding: 6px 10px; width: 70px; font-size: 14px; text-align: center;
+  }
+  .interval-input:focus { outline: none; border-color: #58a6ff; }
+  .unit { color: #8b949e; margin-left: 4px; font-size: 13px; }
+
+  .status-bar {
+    margin-top: 20px; padding: 12px; border-radius: 8px;
+    background: #0d1117; border: 1px solid #21262d; font-size: 13px;
+  }
+  .status-bar p { margin: 4px 0; }
+  .last-run { color: #8b949e; }
+  .refresh-note { color: #484f58; font-size: 11px; margin-top: 16px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔍 考勤监控</h1>
+  <div class="sub">yadan-report 管理后台</div>
+
+  <div class="row">
+    <span class="label">⚡ 强制推送</span>
+    <label class="toggle">
+      <input type="checkbox" id="forceToggle" onchange="toggleForce(this.checked)">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="row">
+    <span class="label">⏱️ 推送间隔</span>
+    <div>
+      <input type="number" class="interval-input" id="intervalInput" value="20" min="5" max="3600" onchange="setInterval_(this.value)">
+      <span class="unit">秒</span>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <p class="last-run">📡 上次运行: <span id="lastRun">-</span></p>
+    <p>📊 上次推送: <span id="lastPush">-</span></p>
+    <p>🟢 状态: <span id="svcStatus">运行中</span></p>
+  </div>
+
+  <div class="refresh-note">状态每 3 秒自动刷新</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    $('forceToggle').checked = d.forceMode;
+    $('intervalInput').value = d.forceIntervalSeconds;
+    $('lastRun').textContent = d.lastRunTime
+      ? new Date(d.lastRunTime).toLocaleTimeString('zh-CN')
+      : '待执行';
+    $('lastPush').textContent = d.lastPushed ? '✅ 已推送' : '⏭️ 无推送';
+    $('svcStatus').textContent = d.running ? '运行中' : '已停止';
+  } catch(e) {}
+}
+
+async function toggleForce(on) {
+  await fetch('/api/toggle', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ forceMode: on })
+  });
+  fetchStatus();
+}
+
+async function setInterval_(val) {
+  const sec = parseInt(val) || 20;
+  await fetch('/api/interval', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ seconds: Math.max(5, Math.min(3600, sec)) })
+  });
+  fetchStatus();
+}
+
+fetchStatus();
+setInterval(fetchStatus, 3000);
+</script>
+</body>
+</html>`;
+
+function startAdminServer() {
+  const server = createServer((req, res) => {
+    const u = new URL(req.url, 'http://localhost');
+    const path = u.pathname;
+
+    // CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204); res.end(); return;
+    }
+
+    // GET / — 管理页面
+    if (req.method === 'GET' && path === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(ADMIN_HTML);
+      return;
+    }
+
+    // GET /api/status
+    if (req.method === 'GET' && path === '/api/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        forceMode: appState.forceMode,
+        forceIntervalSeconds: appState.forceIntervalSeconds,
+        lastRunTime: appState.lastRunTime,
+        lastPushed: appState.lastPushed,
+        lastError: appState.lastError,
+        running: appState.running,
+      }));
+      return;
+    }
+
+    // POST /api/toggle
+    if (req.method === 'POST' && path === '/api/toggle') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { forceMode } = JSON.parse(body);
+          appState.forceMode = !!forceMode;
+          console.log(`[Admin] 强制推送: ${appState.forceMode ? '开启' : '关闭'}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, forceMode: appState.forceMode }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /api/interval
+    if (req.method === 'POST' && path === '/api/interval') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { seconds } = JSON.parse(body);
+          const sec = Math.max(5, Math.min(3600, parseInt(seconds) || 20));
+          appState.forceIntervalSeconds = sec;
+          console.log(`[Admin] 推送间隔设为: ${sec} 秒`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, forceIntervalSeconds: sec }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // 404
+    res.writeHead(404);
+    res.end('Not Found');
+  });
+
+  server.listen(ADMIN_PORT, () => {
+    console.log(`\n🔧 管理后台已启动: http://localhost:${ADMIN_PORT}`);
+  });
+
+  return server;
+}
+
+// ---- 启动守护 + 管理后台 ----
 
 if (isSingleRun) {
+  // 单次执行模式：只启动管理后台用于测试
+  startAdminServer();
   runSingle().catch((err) => {
     console.error('执行失败:', err.message);
     process.exit(1);
   });
 } else {
+  // 守护模式：管理后台 + 轮询并发运行
+  startAdminServer();
   runDaemon().catch((err) => {
     console.error('守护进程异常退出:', err.message);
     process.exit(1);
