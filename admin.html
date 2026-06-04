@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>考勤监控 - 管理后台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1117; color: #e1e4e8; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 32px; width: 420px; max-width: 90vw;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; border-bottom: 1px solid #21262d;
+  }
+  .row:last-child { border-bottom: none; }
+  .label { font-size: 15px; color: #c9d1d9; }
+
+  /* Toggle */
+  .toggle { position: relative; display: inline-block; width: 52px; height: 28px; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+    background: #30363d; border-radius: 28px; transition: .3s;
+  }
+  .slider::before {
+    content: ""; position: absolute; height: 22px; width: 22px;
+    left: 3px; bottom: 3px; background: #c9d1d9; border-radius: 50%; transition: .3s;
+  }
+  input:checked + .slider { background: #238636; }
+  input:checked + .slider::before { transform: translateX(24px); }
+  .toggle-watch input:checked + .slider { background: #d29922; }
+
+  .interval-input {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    color: #e1e4e8; padding: 6px 10px; width: 70px; font-size: 14px; text-align: center;
+  }
+  .interval-input:focus { outline: none; border-color: #58a6ff; }
+  .unit { color: #8b949e; margin-left: 4px; font-size: 13px; }
+
+  .status-bar {
+    margin-top: 20px; padding: 12px; border-radius: 8px;
+    background: #0d1117; border: 1px solid #21262d; font-size: 13px;
+  }
+  .status-bar p { margin: 4px 0; }
+  .refresh-note { color: #484f58; font-size: 11px; margin-top: 16px; text-align: center; }
+
+  .leave-alert {
+    display: none;
+    position: fixed; inset: 0; z-index: 9999;
+    background: linear-gradient(135deg, #ff6b35 0%, #f7c59f 50%, #ff6b35 100%);
+    background-size: 400% 400%;
+    animation: gradientShift 2s ease infinite;
+    flex-direction: column; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .leave-alert.show { display: flex; }
+  @keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+  .alert-emoji { font-size: 96px; animation: bounce 0.8s infinite alternate; }
+  @keyframes bounce {
+    from { transform: translateY(-10px); }
+    to { transform: translateY(10px); }
+  }
+  .alert-title {
+    font-size: clamp(36px, 8vw, 72px); font-weight: 900;
+    color: #fff; text-shadow: 0 4px 20px rgba(0,0,0,.4);
+    margin: 16px 0 8px; text-align: center; letter-spacing: 2px;
+  }
+  .alert-time {
+    font-size: clamp(24px, 5vw, 48px); color: rgba(255,255,255,.9);
+    font-weight: 700; text-align: center;
+  }
+  .alert-hint { margin-top: 32px; font-size: 14px; color: rgba(255,255,255,.6); }
+</style>
+</head>
+<body>
+<div class="leave-alert" id="leaveAlert" onclick="dismissAlert()">
+  <div class="alert-emoji">🎉</div>
+  <div class="alert-title">雅丹下班了！</div>
+  <div class="alert-time" id="alertTime"></div>
+  <div class="alert-hint">点击任意位置关闭</div>
+</div>
+
+<div class="card">
+  <h1>🔍 考勤监控</h1>
+  <div class="sub">yadan-report 管理后台</div>
+
+  <div class="row">
+    <span class="label">⚡ 强制推送</span>
+    <label class="toggle">
+      <input type="checkbox" id="forceToggle" onchange="toggleForce(this.checked)">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="row">
+    <span class="label">⏱️ 推送间隔</span>
+    <div>
+      <input type="number" class="interval-input" id="intervalInput" value="20" min="5" max="3600" onchange="setIntervalSec(this.value)">
+      <span class="unit">秒</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <span class="label">👀 下班监听</span>
+    <label class="toggle toggle-watch">
+      <input type="checkbox" id="watchToggle" onchange="toggleWatch(this.checked)">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="status-bar">
+    <p style="font-size:15px;font-weight:600;letter-spacing:1px;color:#c9d1d9;margin-bottom:6px;">🕐 <span id="clock">--</span></p>
+    <p>📡 上次运行: <span id="lastRun">-</span></p>
+    <p>📊 上次推送: <span id="lastPush">-</span></p>
+    <p>🥚 鸭蛋状态: <span id="yadanStatus">-</span></p>
+    <p>🟢 服务: <span id="svcStatus">运行中</span></p>
+  </div>
+
+  <div class="refresh-note">状态每 5 秒自动刷新</div>
+</div>
+
+<script>
+var $ = function(id) { return document.getElementById(id); };
+
+var watchMode = false;
+var lastAlertedTime = null;
+
+function updateClock() {
+  var n = new Date();
+  $('clock').textContent =
+    n.getFullYear() + '年'
+    + String(n.getMonth() + 1).padStart(2, '0') + '月'
+    + String(n.getDate()).padStart(2, '0') + '日 '
+    + String(n.getHours()).padStart(2, '0') + ':'
+    + String(n.getMinutes()).padStart(2, '0') + ':'
+    + String(n.getSeconds()).padStart(2, '0');
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+function fetchStatus() {
+  fetch('/api/status')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      $('forceToggle').checked = d.forceMode;
+      $('intervalInput').value = d.forceIntervalSeconds;
+      $('lastRun').textContent = d.lastRunTime
+        ? new Date(d.lastRunTime).toLocaleTimeString('zh-CN')
+        : '待执行';
+      $('lastPush').textContent = d.lastPushed ? '✅ 已推送' : '⏭️ 无推送';
+      $('svcStatus').textContent = d.running ? '运行中' : '已停止';
+
+      var ys = $('yadanStatus');
+      if (d.yadanLeaveTime) {
+        ys.textContent = '🚪 鸭蛋已下班 ' + d.yadanLeaveTime.substring(0, 5);
+        ys.style.color = '#3fb950';
+        if (watchMode && d.yadanLeaveTime !== lastAlertedTime) {
+          lastAlertedTime = d.yadanLeaveTime;
+          $('alertTime').textContent = '下班时间 ' + d.yadanLeaveTime.substring(0, 5);
+          $('leaveAlert').classList.add('show');
+        }
+      } else {
+        ys.textContent = '🕐 鸭蛋上班中';
+        ys.style.color = '#8b949e';
+      }
+    })
+    .catch(function() {});
+}
+fetchStatus();
+setInterval(fetchStatus, 5000);
+
+function toggleForce(on) {
+  fetch('/api/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ forceMode: on })
+  }).then(function() { fetchStatus(); });
+}
+
+function setIntervalSec(val) {
+  var sec = Math.max(5, Math.min(3600, parseInt(val) || 20));
+  fetch('/api/interval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds: sec })
+  }).then(function() { fetchStatus(); });
+}
+
+function toggleWatch(on) {
+  watchMode = on;
+  if (!on) { lastAlertedTime = null; $('leaveAlert').classList.remove('show'); }
+}
+
+function dismissAlert() {
+  $('leaveAlert').classList.remove('show');
+}
+</script>
+</body>
+</html>

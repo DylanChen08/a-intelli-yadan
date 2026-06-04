@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'url';
-import { dirname, resolve } from 'path';
+import { dirname, resolve, join } from 'path';
 import { createServer } from 'http';
+import { readFileSync } from 'fs';
 import dotenv from 'dotenv';
 
 // 确保从脚本所在目录加载 .env
@@ -21,6 +22,9 @@ const appState = {
   lastError: null,
   lastPushed: false,
   running: true,
+  // 雅丹下班状态
+  yadanLeaveTime: null,    // "HH:mm:ss" 或 null
+  yadanLeaveDate: null,    // "YYYY-MM-DD" 当天日期，用于跨天重置
 };
 
 // ---- 配置 ----
@@ -196,6 +200,27 @@ async function runOnce(config, state = {}, forcePush = false) {
     state.lastResults = results;
     state.lastDeptResults = deptResults;
 
+    // ---- 更新雅丹下班状态（供前端实时监听用） ----
+    const yadanResult = results.find(r => r.name === '吴雅丹');
+    if (yadanResult) {
+      const todayDateStr = todayDate; // 已在函数顶部定义
+      // 跨天自动重置
+      if (appState.yadanLeaveDate && appState.yadanLeaveDate !== todayDateStr) {
+        appState.yadanLeaveTime = null;
+        appState.yadanLeaveDate = null;
+      }
+      if (yadanResult.leaveInfo) {
+        appState.yadanLeaveTime = yadanResult.leaveInfo.time.split(' ')[1]; // HH:mm:ss
+        appState.yadanLeaveDate = todayDateStr;
+      } else {
+        // 今天还没下班，确保是 null（不保留昨天的值）
+        if (appState.yadanLeaveDate !== todayDateStr) {
+          appState.yadanLeaveTime = null;
+        }
+        appState.yadanLeaveDate = todayDateStr;
+      }
+    }
+
     if (!hasDataChange) {
       console.log(`[${timeStr}] ⏭️ 数据无变化，跳过推送`);
       return { success: true, pushed: false, state };
@@ -318,136 +343,7 @@ const isSingleRun = process.argv.includes('--once') || process.argv.includes('--
 const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '3456', 10);
 
 // ---- HTTP 管理后台 ----
-const ADMIN_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>考勤监控 - 管理后台</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0f1117; color: #e1e4e8; min-height: 100vh;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .card {
-    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-    padding: 32px; width: 420px; max-width: 90vw;
-  }
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
-  .sub { color: #8b949e; font-size: 13px; margin-bottom: 24px; }
-  .row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 0; border-bottom: 1px solid #21262d;
-  }
-  .row:last-child { border-bottom: none; }
-  .label { font-size: 15px; color: #c9d1d9; }
-  .val { font-size: 14px; color: #8b949e; }
-  .val.ok { color: #3fb950; }
-  .val.err { color: #f85149; }
-
-  /* Toggle Switch */
-  .toggle { position: relative; display: inline-block; width: 52px; height: 28px; }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .slider {
-    position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-    background: #30363d; border-radius: 28px; transition: .3s;
-  }
-  .slider::before {
-    content: ""; position: absolute; height: 22px; width: 22px;
-    left: 3px; bottom: 3px; background: #c9d1d9; border-radius: 50%; transition: .3s;
-  }
-  input:checked + .slider { background: #238636; }
-  input:checked + .slider::before { transform: translateX(24px); }
-
-  .interval-input {
-    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-    color: #e1e4e8; padding: 6px 10px; width: 70px; font-size: 14px; text-align: center;
-  }
-  .interval-input:focus { outline: none; border-color: #58a6ff; }
-  .unit { color: #8b949e; margin-left: 4px; font-size: 13px; }
-
-  .status-bar {
-    margin-top: 20px; padding: 12px; border-radius: 8px;
-    background: #0d1117; border: 1px solid #21262d; font-size: 13px;
-  }
-  .status-bar p { margin: 4px 0; }
-  .last-run { color: #8b949e; }
-  .refresh-note { color: #484f58; font-size: 11px; margin-top: 16px; text-align: center; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>🔍 考勤监控</h1>
-  <div class="sub">yadan-report 管理后台</div>
-
-  <div class="row">
-    <span class="label">⚡ 强制推送</span>
-    <label class="toggle">
-      <input type="checkbox" id="forceToggle" onchange="toggleForce(this.checked)">
-      <span class="slider"></span>
-    </label>
-  </div>
-
-  <div class="row">
-    <span class="label">⏱️ 推送间隔</span>
-    <div>
-      <input type="number" class="interval-input" id="intervalInput" value="20" min="5" max="3600" onchange="setInterval_(this.value)">
-      <span class="unit">秒</span>
-    </div>
-  </div>
-
-  <div class="status-bar">
-    <p class="last-run">📡 上次运行: <span id="lastRun">-</span></p>
-    <p>📊 上次推送: <span id="lastPush">-</span></p>
-    <p>🟢 状态: <span id="svcStatus">运行中</span></p>
-  </div>
-
-  <div class="refresh-note">状态每 3 秒自动刷新</div>
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-
-async function fetchStatus() {
-  try {
-    const r = await fetch('/api/status');
-    const d = await r.json();
-    $('forceToggle').checked = d.forceMode;
-    $('intervalInput').value = d.forceIntervalSeconds;
-    $('lastRun').textContent = d.lastRunTime
-      ? new Date(d.lastRunTime).toLocaleTimeString('zh-CN')
-      : '待执行';
-    $('lastPush').textContent = d.lastPushed ? '✅ 已推送' : '⏭️ 无推送';
-    $('svcStatus').textContent = d.running ? '运行中' : '已停止';
-  } catch(e) {}
-}
-
-async function toggleForce(on) {
-  await fetch('/api/toggle', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ forceMode: on })
-  });
-  fetchStatus();
-}
-
-async function setInterval_(val) {
-  const sec = parseInt(val) || 20;
-  await fetch('/api/interval', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ seconds: Math.max(5, Math.min(3600, sec)) })
-  });
-  fetchStatus();
-}
-
-fetchStatus();
-setInterval(fetchStatus, 3000);
-</script>
-</body>
-</html>`;
+const ADMIN_HTML = readFileSync(join(__dirname, 'admin.html'), 'utf8');
 
 function startAdminServer() {
   const server = createServer((req, res) => {
@@ -465,7 +361,11 @@ function startAdminServer() {
 
     // GET / — 管理页面
     if (req.method === 'GET' && path === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+      });
       res.end(ADMIN_HTML);
       return;
     }
@@ -480,6 +380,8 @@ function startAdminServer() {
         lastPushed: appState.lastPushed,
         lastError: appState.lastError,
         running: appState.running,
+        yadanLeaveTime: appState.yadanLeaveTime,
+        yadanLeaveDate: appState.yadanLeaveDate,
       }));
       return;
     }
