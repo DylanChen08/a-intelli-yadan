@@ -11,7 +11,7 @@ dotenv.config({ path: resolve(__dirname, '.env') });
 
 import { getToken } from './src/auth.js';
 import { getPersonLeaveToday } from './src/record.js';
-import { getPersonWeekRecords, extractDailyTimes } from './src/weekly.js';
+import { getPersonWeekRecords, extractDailyTimes, getPersonMonthRecords } from './src/weekly.js';
 import { buildSmartReport, sendNotify } from './src/notify.js';
 
 // ---- 全局运行时状态（HTTP 服务和守护循环共享） ----
@@ -25,6 +25,8 @@ const appState = {
   // 雅丹下班状态
   yadanLeaveTime: null,    // "HH:mm:ss" 或 null
   yadanLeaveDate: null,    // "YYYY-MM-DD" 当天日期，用于跨天重置
+  // 月度打卡数据（供前端网页表格用）
+  monthRecords: null,
 };
 
 // ---- 配置 ----
@@ -129,6 +131,8 @@ async function runOnce(config, state = {}, forcePush = false) {
     state.lastDeptResults = null;
     state.weekData = null;
     state.lastWeekDate = null;
+    state.monthRecords = null;
+    state.lastMonthDate = null;
   }
   state.lastDate = todayDate;
 
@@ -187,6 +191,22 @@ async function runOnce(config, state = {}, forcePush = false) {
       }
     }
 
+    // ---- 查询吴雅丹近一个月打卡记录（每天只查一次，缓存复用） ----
+    const yadanPerson = config.persons.find(p => p.name === '吴雅丹');
+    if (yadanPerson && (!state.monthRecords || state.lastMonthDate !== todayDate)) {
+      console.log(`[${timeStr}] 📆 查询吴雅丹近一个月打卡记录...`);
+      try {
+        const { records } = await getPersonMonthRecords(token, yadanPerson.personId, '吴雅丹', 30);
+        state.monthRecords = records;
+        state.lastMonthDate = todayDate;
+        appState.monthRecords = records;
+        console.log(`[${timeStr}] 📆 月度数据已更新，共 ${records.length} 条`);
+      } catch (err) {
+        console.warn(`[${timeStr}] ⚠️ 月度数据查询失败: ${err.message}`);
+        state.monthRecords = null;
+      }
+    }
+
     // 检测数据是否有变化（核心人员 + 部门同事）
     const hasCoreDataChange = hasNewData(results, state.lastResults || null);
     const hasDeptDataChange = hasNewData(deptResults, state.lastDeptResults || null);
@@ -227,7 +247,7 @@ async function runOnce(config, state = {}, forcePush = false) {
     }
 
     // 生成报告并推送
-    const report = buildSmartReport(results, allResults, state.weekData);
+    const report = buildSmartReport(results, allResults, state.weekData, state.monthRecords);
     console.log(`[${timeStr}] 日报生成完毕`);
     await sendNotify(config.sendKey, report.title, report.content);
 
@@ -302,6 +322,8 @@ async function runDaemon() {
     lastDate: null,
     weekData: null,
     lastWeekDate: null,
+    monthRecords: null,
+    lastMonthDate: null,
   };
 
   let lastRunTime = 0;
@@ -422,6 +444,19 @@ function startAdminServer() {
           res.end(JSON.stringify({ ok: false, error: e.message }));
         }
       });
+      return;
+    }
+
+    // GET /api/monthly — 吴雅丹近一个月打卡记录
+    if (req.method === 'GET' && path === '/api/monthly') {
+      const records = (appState.monthRecords || []).slice().sort((a, b) =>
+        new Date(b.identifyTime) - new Date(a.identifyTime)
+      );
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({ records }));
       return;
     }
 

@@ -1,4 +1,4 @@
-import { queryRecords } from './record.js';
+import { queryRecords, extractPhotoUrl } from './record.js';
 
 /**
  * 查询某人最近 N 天的通行记录（用于周对比）
@@ -29,6 +29,43 @@ export async function getPersonWeekRecords(token, personId, personName, days = 7
   }
 
   console.log(`[Week] ${personName} 近${days}天合计 ${allRecords.length} 条`);
+  return { name: personName, personId, records: allRecords };
+}
+
+/**
+ * 查询某人近 N 天的所有通行记录（含抓拍照片URL），用于月度打卡明细
+ * 按天单独查询规避 API 跨天 bug，每条记录自动附加 photoUrl 字段
+ * @param {string} token
+ * @param {string} personId
+ * @param {string} personName
+ * @param {number} days - 查询天数，默认 30
+ * @returns {{ name: string, personId: string, records: Array }}
+ */
+export async function getPersonMonthRecords(token, personId, personName, days = 30) {
+  const now = new Date();
+  const allRecords = [];
+
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const startTime = `${dateStr} 00:00:00`;
+    const endTime = `${dateStr} 23:59:59`;
+
+    try {
+      // pageSize=200，月度数据单天一般不超过此数
+      const dayRecords = await queryRecords(token, personId, startTime, endTime, 200);
+      // 给每条记录附上 photoUrl
+      for (const r of dayRecords) {
+        r.photoUrl = extractPhotoUrl(r);
+      }
+      allRecords.push(...dayRecords);
+    } catch (err) {
+      console.warn(`[Month] ${personName} ${dateStr} 查询失败: ${err.message}`);
+    }
+  }
+
+  console.log(`[Month] ${personName} 近${days}天合计 ${allRecords.length} 条`);
   return { name: personName, personId, records: allRecords };
 }
 

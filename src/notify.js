@@ -442,7 +442,39 @@ function buildWeeklyComparison(weekData) {
   return text;
 }
 
-export function buildSmartReport(personResults, allResults, weekData = null) {
+/**
+ * 生成吴雅丹近一个月每日打卡明细表格（含照片链接）
+ * @param {Array} records - 吴雅丹近30天所有打卡记录（每条含 photoUrl）
+ * @returns {string} Markdown 表格
+ */
+function buildMonthlyTable(records) {
+  if (!records || records.length === 0) {
+    return '📆 **吴雅丹 近一个月打卡记录**\n\n暂无记录\n\n';
+  }
+
+  // 按时间倒序排列（最近在前）
+  const sorted = [...records].sort((a, b) => new Date(b.identifyTime) - new Date(a.identifyTime));
+
+  let text = '📆 **吴雅丹 近一个月打卡记录**\n\n';
+  text += '| 日期 | 时间 | 方向 | 门 | 状态 | 抓拍照片 |\n';
+  text += '|------|------|------|----|------|----------|\n';
+
+  for (const r of sorted) {
+    const dt = (r.identifyTime || '-').split(' ');
+    const date = dt[0] ? dt[0].substring(5) : '-'; // MM-DD
+    const time = dt[1] || '-';
+    const deviceName = r.deviceName || '未知';
+    const direction = deviceName.includes('出') ? '出门' : '进门';
+    const status = r.passStatus === '1' ? '正常' : '⚠️ 异常';
+    const photo = r.photoUrl ? `[📷 查看](${r.photoUrl})` : '无';
+    text += `| ${date} | ${time} | ${direction} | ${deviceName} | ${status} | ${photo} |\n`;
+  }
+
+  text += '\n';
+  return text;
+}
+
+export function buildSmartReport(personResults, allResults, weekData = null, monthRecords = null) {
   const today = new Date();
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
@@ -462,7 +494,10 @@ export function buildSmartReport(personResults, allResults, weekData = null) {
   // 周对比部分
   const weekPart = weekData ? `${buildWeeklyComparison(weekData)}---\n\n` : '';
 
-  const content = `${tablePart}${buildCanteenTable(allResults)}---\n\n${buildComparisonTable(allResults)}\n\n---\n\n${buildComparisonAnalysis(allResults)}\n\n---\n\n${weekPart}> 🤖 智能日报 | ${dateStr} 周${weekDay}`;
+  // 近一个月打卡明细
+  const monthPart = monthRecords ? `${buildMonthlyTable(monthRecords)}---\n\n` : '';
+
+  const content = `${tablePart}${buildCanteenTable(allResults)}---\n\n${buildComparisonTable(allResults)}\n\n---\n\n${buildComparisonAnalysis(allResults)}\n\n---\n\n${weekPart}${monthPart}> 🤖 智能日报 | ${dateStr} 周${weekDay}`;
 
   return { title, content };
 }

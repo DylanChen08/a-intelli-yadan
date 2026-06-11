@@ -9,7 +9,6 @@
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #0f1117; color: #e1e4e8; min-height: 100vh;
-    display: flex; align-items: center; justify-content: center;
   }
   .card {
     background: #161b22; border: 1px solid #30363d; border-radius: 12px;
@@ -53,6 +52,71 @@
   .status-bar p { margin: 4px 0; }
   .refresh-note { color: #484f58; font-size: 11px; margin-top: 16px; text-align: center; }
 
+  /* ===== 月度打卡表格 ===== */
+  .monthly-card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 24px 20px; width: 960px; max-width: 95vw; margin-top: 24px;
+  }
+  .monthly-card h2 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+  .monthly-meta { color: #8b949e; font-size: 12px; margin-bottom: 16px; }
+  .monthly-table-wrap { max-height: 600px; overflow-y: auto; border: 1px solid #21262d; border-radius: 8px; }
+  .monthly-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  .monthly-table th {
+    position: sticky; top: 0; z-index: 2;
+    background: #1c2128; color: #8b949e; font-weight: 600;
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid #30363d;
+  }
+  .monthly-table td {
+    padding: 6px 10px; border-bottom: 1px solid #21262d;
+    vertical-align: middle; color: #c9d1d9;
+  }
+  .monthly-table tbody tr:hover { background: #1c2128; }
+  .monthly-table .dir-out { color: #f0883e; font-weight: 600; }
+  .monthly-table .dir-in  { color: #3fb950; font-weight: 600; }
+  .monthly-table .status-bad { color: #f85149; }
+
+  .photo-thumb {
+    width: 56px; height: 56px; object-fit: cover; border-radius: 6px;
+    border: 1px solid #30363d; cursor: pointer; transition: transform .15s, border-color .15s;
+    background: #0d1117;
+  }
+  .photo-thumb:hover { transform: scale(1.08); border-color: #58a6ff; }
+  .photo-thumb-placeholder {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 56px; height: 56px; border-radius: 6px;
+    background: #0d1117; border: 1px solid #30363d;
+    color: #484f58; font-size: 11px;
+  }
+
+  /* ===== 图片放大弹窗 Modal ===== */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(0,0,0,.88);
+    align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal-overlay img {
+    max-width: 90vw; max-height: 90vh; border-radius: 12px;
+    cursor: default; box-shadow: 0 8px 40px rgba(0,0,0,.6);
+  }
+  .modal-close {
+    position: fixed; top: 20px; right: 28px; z-index: 10001;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: rgba(255,255,255,.12); border: none;
+    color: #fff; font-size: 22px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .2s;
+  }
+  .modal-close:hover { background: rgba(255,255,255,.22); }
+
+  .empty-hint { text-align: center; color: #484f58; padding: 40px 0; font-size: 14px; }
+  .loading-hint { text-align: center; color: #8b949e; padding: 20px 0; font-size: 13px; }
+
+
   .leave-alert {
     display: none;
     position: fixed; inset: 0; z-index: 9999;
@@ -93,6 +157,14 @@
   <div class="alert-hint">点击任意位置关闭</div>
 </div>
 
+<!-- 图片放大弹窗 -->
+<div class="modal-overlay" id="photoModal" onclick="closeModal()">
+  <button class="modal-close" onclick="closeModal()">✕</button>
+  <img id="modalImg" src="" alt="抓拍照片" onclick="event.stopPropagation()">
+</div>
+
+<div style="display:flex;flex-direction:column;align-items:center;padding:24px 0;">
+
 <div class="card">
   <h1>🔍 考勤监控</h1>
   <div class="sub">yadan-report 管理后台</div>
@@ -130,6 +202,31 @@
   </div>
 
   <div class="refresh-note">状态每 5 秒自动刷新</div>
+</div>
+
+<!-- 月度打卡记录 -->
+<div class="monthly-card" id="monthlyCard">
+  <h2>📆 吴雅丹 近一个月打卡记录</h2>
+  <div class="monthly-meta" id="monthlyMeta">加载中...</div>
+  <div class="monthly-table-wrap">
+    <table class="monthly-table" id="monthlyTable">
+      <thead>
+        <tr>
+          <th>日期</th>
+          <th>时间</th>
+          <th>方向</th>
+          <th>门</th>
+          <th>状态</th>
+          <th>抓拍照片</th>
+        </tr>
+      </thead>
+      <tbody id="monthlyBody">
+        <tr><td colspan="6" class="loading-hint">⏳ 加载中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 </div>
 
 <script>
@@ -207,6 +304,83 @@ function toggleWatch(on) {
 function dismissAlert() {
   $('leaveAlert').classList.remove('show');
 }
+
+// ===== 月度打卡数据 =====
+function fetchMonthly() {
+  fetch('/api/monthly')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      // 替换空格为T兼容Safari日期解析，倒序排列
+      var records = (d.records || []).sort(function(a, b) {
+        return new Date(b.identifyTime.replace(' ', 'T')) - new Date(a.identifyTime.replace(' ', 'T'));
+      });
+      var body = $('monthlyBody');
+      var meta = $('monthlyMeta');
+
+      if (records.length === 0) {
+        meta.textContent = '暂无数据（等待首次查询）';
+        body.innerHTML = '<tr><td colspan="6" class="empty-hint">暂无打卡记录</td></tr>';
+        return;
+      }
+
+      meta.textContent = '共 ' + records.length + ' 条，最近在前';
+      var html = '';
+      for (var i = 0; i < records.length; i++) {
+        var r = records[i];
+        var dt = (r.identifyTime || '-').split(' ');
+        var date = dt[0] ? dt[0].substring(5) : '-';
+        var time = dt[1] || '-';
+        var deviceName = r.deviceName || '未知';
+        var dirClass = deviceName.indexOf('出') !== -1 ? 'dir-out' : 'dir-in';
+        var dirText = deviceName.indexOf('出') !== -1 ? '出门' : '进门';
+        var statusHtml = r.passStatus === '1' ? '正常' : '<span class="status-bad">⚠️ 异常</span>';
+
+        var photoCell;
+        if (r.photoUrl) {
+          photoCell = '<img class="photo-thumb" src="' + escapeHtml(r.photoUrl)
+            + '" onclick="openPhoto(\'' + escapeJs(r.photoUrl) + '\');event.stopPropagation()"'
+            + ' loading="lazy" onerror="this.outerHTML=\'<div class=photo-thumb-placeholder><div>不可用</div></div>\'">';
+        } else {
+          photoCell = '<div class="photo-thumb-placeholder">无照片</div>';
+        }
+
+        html += '<tr>'
+          + '<td>' + date + '</td>'
+          + '<td>' + time + '</td>'
+          + '<td class="' + dirClass + '">' + dirText + '</td>'
+          + '<td>' + deviceName + '</td>'
+          + '<td>' + statusHtml + '</td>'
+          + '<td>' + photoCell + '</td>'
+          + '</tr>';
+      }
+      body.innerHTML = html;
+    })
+    .catch(function() {
+      $('monthlyBody').innerHTML = '<tr><td colspan="6" class="empty-hint">加载失败</td></tr>';
+    });
+}
+
+function openPhoto(url) {
+  $('modalImg').src = url;
+  $('photoModal').classList.add('show');
+}
+
+function closeModal() {
+  $('photoModal').classList.remove('show');
+  $('modalImg').src = '';
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function escapeJs(str) {
+  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+fetchMonthly();
+setInterval(fetchMonthly, 60000); // 每分钟刷新月度数据
+
 </script>
 </body>
 </html>
